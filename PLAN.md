@@ -5,6 +5,49 @@
 > **2026-07-14 刷新记录**：PLAN.md 顶部加 §"Refresh log 2026-07-14"；其他章节保留原貌。
 > 原有工业网关发行版计划已保留于文末「既有详细计划（存档）」。
 
+## Refresh log 2026-07-17 (fix/font-in-tree：文字渲染修复 + kei vtty 控制台)
+
+- **文字渲染根因找到并修复**（commit `c4cc8d4`）：`system_fonts: false` 时，
+  fontique `register_fonts` **不会**自动填充 generic-family 映射表与 script
+  fallback 表（这两张表只由系统字体库扫描填充）。于是 CSS 通用族
+  （`sans-serif`/`serif`/`monospace`）与 UA 默认字体栈匹配 0 个字体，
+  parley 排版零 glyph、paint_scene 不画文字——这正是 kei 侧"子集字体注册
+  成功但 paint 不画文字节点"的根因（并非字体太大或注册失败）。
+- **修法**：`lib.rs::new_embedded_font_context()` 注册内嵌字体后显式
+  `set_generic_families`（全部 GenericFamily → 内嵌 DejaVu Sans /
+  DejaVu Sans Mono）+ `append_fallbacks`（Latn/Grek/Cyrl 等 → 内嵌字体）；
+  `render_html` / `render_html_with_font` 统一使用它；
+  `winit_backend::new_font_context` 改为 append 模式兜底。
+  `render_html_with_font` 顺带把 `Arc<dyn AsRef<[u8]>>` blob 改成具体
+  `Vec<u8>`（kei VM 上 dyn vtable 读 NULL 的老坑）。
+- **新增内嵌等宽字体**：`packages/render/assets/font-mono.ttf`
+  （DejaVu Sans Mono 子集，Basic Latin + Latin-1 + box-drawing，41 KB，
+  fonttools 裁剪；许可证 `assets/LICENSE.dejavu`）。"字体库自维护"现状：
+  in-tree fork 方案已放弃（见 2026-07-15 记录），自维护 = crates.io
+  parley 0.10/fontique + aris 仓内嵌字体资产 + 上述 FontContext 装配函数。
+- **kei vtty 控制台帧**（commit `6ae40e8`）：新增 host 工具
+  `prerender_vtty`，用完整 aris-render 管线离线渲染现代 Linux 内核控制台
+  风格状态屏（黑底、浅色等宽字、`[    0.000000] kei: ...` 内核日志排版、
+  无科幻元素），产物 `packages/render/assets/vtty_console.png` 入 git；
+  `kei_tty` 改为内嵌该 PNG（替换已被移除的 1280x800 rgba fixture，原
+  include_bytes! 已无法编译），运行时用纯 Rust png crate 解码 blit 到
+  /dev/fb0，WS JSON-RPC 网关（:8423）不变；feature gate 仅 `png`，
+  musl 交叉编译不再拉 Blitz/Vello。
+- **bin feature gates 修正**：`render_test`/`kei_ui`/`prerender_cursor`
+  只需 `render`；`kei_fbtest`/`kei_minimal` 无需 feature（补 unix 门禁
+  stub，Windows 主机 workspace check 保持绿）；`font_smoke`（新，字体
+  管线离线诊断）与 `prerender_vtty` 需 `render`；`kei_tty` 需 `png`。
+- **本机绝对路径清理**（commit `abdabe5`）：`.cargo/config-riscv.toml`
+  的 `D:\...` musl-gcc linker 改成文档化模板；`scripts/zig_cc.sh` 改用
+  PATH（`$ZIG` 覆盖）；`offscreen_chrome.rs` 默认输出改相对路径；删除
+  多余的 `.cargo/config.toml.bak`。
+- **验证**：主机离线渲染 `font_smoke.png`（generic 查询全部命中、三行
+  文字清晰）；`prerender_vtty` 产物 1280x800 控制台 PNG 目视符合要求；
+  `aarch64-unknown-linux-musl` release 交叉编译 `kei_tty` 成功（静态
+  ELF，~950 KB）。
+- **跨仓依赖**：kei 侧 `agent/vtty-linux-console` 分支（justfile/initramfs
+  切到 kei_tty）依赖本分支的 `kei_tty` 与内嵌 PNG 资产。
+
 ## Refresh log 2026-07-14
 
 - **当前分支**：`dev` · 领先 `origin/dev` 1 commit
