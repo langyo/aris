@@ -1,96 +1,142 @@
 // kei_tty — aris-rendered vtty display + WS JSON-RPC gateway.
 //
 // Architecture:
-//   1. Pre-rendered vtty frame (aris tairitsu → Vello CPU at build time)
-//      is embedded as RGBA and written to /dev/fb0.
-//   2. WS JSON-RPC server on port 8423 for webui debugging.
+//   1. The vtty frame is a Linux-kernel-console-style status screen
+//      (black background, light monospace text, `[    0.000000] kei: ...`
+//      kernel-log layout). It is pre-rendered on the HOST by
+//      `prerender_vtty` through the full aris-render pipeline
+//      (Blitz DOM + Stylo CSS + Taffy layout + parley text + Vello CPU)
+//      and tracked as `packages/render/assets/vtty_console.png`.
+//      This binary embeds that PNG, decodes it at runtime (pure-Rust
+//      `png` crate — no system libs) and blits it to /dev/fb0.
+//   2. WS JSON-RPC server on port 8423 for the headless HMI (webui).
 //   3. Standby poll loop (mouse + WS connections).
+//
+// Regenerate the console frame after style changes:
+//   cargo run -p aris-render --no-default-features --features render \
+//       --bin prerender_vtty
 
 #![allow(unsafe_code)]
 
-const W: usize = 1280;
-const H: usize = 800;
-
-/// Pre-rendered vtty RGBA from tairitsu kei-desktop component.
-const VTTY_RGBA: &[u8] = include_bytes!("../../../../tests/fixtures/kei_desktop_1280x800.rgba");
+/// Pre-rendered vtty console frame (PNG, RGBA8, 1280x800).
+#[allow(dead_code)] // used only in the unix fbdev path
+const VTTY_PNG: &[u8] = include_bytes!("../../assets/vtty_console.png");
 
 fn main() {
+    real_main();
+}
+
+#[cfg(not(unix))]
+fn real_main() {
+    eprintln!("kei_tty: unix-only binary (kei /dev/fb0 target); nothing to do on this host");
+}
+
+#[cfg(unix)]
+fn real_main() {
     let log = |m: &[u8]| unsafe { libc::write(2, m.as_ptr() as *const _, m.len() as _); };
     log(b"kei_tty: aris-rendered vtty + gateway starting\n");
 
-    #[cfg(unix)]
-    {
-        let fb_path = std::env::var("KEI_FB").unwrap_or_else(|_| "/dev/fb0".to_string());
-        if std::path::Path::new(&fb_path).exists() {
-            log(b"kei_tty: writing aris vtty to /dev/fb0\n");
-            let mut bgrx = vec![0u8; W * H * 4];
-            for i in 0..(W * H) {
-                let s = i * 4; let d = i * 4;
-                bgrx[d] = VTTY_RGBA[s + 2]; bgrx[d + 1] = VTTY_RGBA[s + 1];
-                bgrx[d + 2] = VTTY_RGBA[s]; bgrx[d + 3] = 0xFF;
-            }
-            if let Ok(mut file) = std::fs::OpenOptions::new().read(true).write(true).open(&fb_path) {
-                use std::io::{Seek, Write};
-                let _ = file.seek(std::io::SeekFrom::Start(0));
-                const CHUNK: usize = 8192;
-                let mut wr = 0usize; let sz = bgrx.len();
-                while wr < sz {
-                    let end = (wr + CHUNK).min(sz);
-                    if file.write(&bgrx[wr..end]).unwrap_or(0) == 0 { break; }
-                    wr += end - wr;
-                }
-                unsafe {
-                    const FB_FLUSH: u64 = 0x4606;
-                    let fd = std::os::fd::AsRawFd::as_raw_fd(&file);
-                    for _ in 0..65 { let _ = libc::ioctl(fd, FB_FLUSH as _, 0usize); }
-                }
-                log(b"kei_tty: vtty displayed\n");
-            }
+    // Decode the embedded console PNG (host pre-rendered by prerender_vtty).
+    let (width, height, rgba) = match decode_png_rgba(VTTY_PNG) {
+        Some(frame) => frame,
+        None => {
+            log(b"kei_tty: FATAL: embedded vtty PNG decode failed\n");
+            loop { std::thread::sleep(std::time::Duration::from_secs(3600)); }
         }
+    };
+    let dims = format!("kei_tty: console frame {}x{}\n", width, height);
+    log(dims.as_bytes());
 
-        let ws_fd = create_tcp_listener(8423);
-        if ws_fd >= 0 { log(b"kei_tty: WS listening on :8423\n"); }
-
-        let mut mouse_fd: i32 = -1;
-        for i in 0..8u32 {
-            let path = format!("/dev/input/event{}", i);
-            if let Ok(fd) = open_dev(&path) {
-                let name = get_dev_name(fd);
-                if name.contains("Mouse") { mouse_fd = fd; break; }
-                unsafe { libc::close(fd); }
-            }
+    let fb_path = std::env::var("KEI_FB").unwrap_or_else(|_| "/dev/fb0".to_string());
+    if std::path::Path::new(&fb_path).exists() {
+        log(b"kei_tty: writing aris vtty to /dev/fb0\n");
+        let npix = width * height;
+        let mut bgrx = vec![0u8; npix * 4];
+        for i in 0..npix {
+            let s = i * 4;
+            let d = i * 4;
+            bgrx[d] = rgba[s + 2];
+            bgrx[d + 1] = rgba[s + 1];
+            bgrx[d + 2] = rgba[s];
+            bgrx[d + 3] = 0xFF;
         }
+        if let Ok(mut file) = std::fs::OpenOptions::new().read(true).write(true).open(&fb_path) {
+            use std::io::{Seek, Write};
+            let _ = file.seek(std::io::SeekFrom::Start(0));
+            const CHUNK: usize = 8192;
+            let mut wr = 0usize;
+            let sz = bgrx.len();
+            while wr < sz {
+                let end = (wr + CHUNK).min(sz);
+                if file.write(&bgrx[wr..end]).unwrap_or(0) == 0 { break; }
+                wr += end - wr;
+            }
+            unsafe {
+                const FB_FLUSH: u64 = 0x4606;
+                let fd = std::os::fd::AsRawFd::as_raw_fd(&file);
+                for _ in 0..65 { let _ = libc::ioctl(fd, FB_FLUSH as _, 0usize); }
+            }
+            log(b"kei_tty: vtty displayed\n");
+        }
+    } else {
+        log(b"kei_tty: no fb device (set KEI_FB); skipping display\n");
+    }
 
-        log(b"kei_tty: entering standby\n");
-        let mut event_buf = [0u8; 24 * 8];
-        loop {
-            let mut fds = [libc::pollfd { fd: -1, events: 0, revents: 0 }; 3];
-            let mut n: u64 = 0;
-            if mouse_fd >= 0 { fds[n as usize] = libc::pollfd { fd: mouse_fd, events: libc::POLLIN, revents: 0 }; n += 1; }
-            if ws_fd >= 0 { fds[n as usize] = libc::pollfd { fd: ws_fd, events: libc::POLLIN, revents: 0 }; n += 1; }
-            if n == 0 { std::thread::sleep(std::time::Duration::from_secs(1)); continue; }
-            if unsafe { libc::poll(fds.as_mut_ptr(), n, 500) } <= 0 { continue; }
-            if mouse_fd >= 0 && fds[0].revents & libc::POLLIN != 0 {
-                unsafe { libc::read(mouse_fd, event_buf.as_mut_ptr() as *mut _, event_buf.len()); }
-            }
-            let ws_idx = if mouse_fd >= 0 { 1 } else { 0 };
-            if ws_fd >= 0 && ws_idx < n as usize && fds[ws_idx].revents & libc::POLLIN != 0 {
-                let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
-                let mut alen: libc::socklen_t = std::mem::size_of::<libc::sockaddr_in>() as u32;
-                let cfd = unsafe { libc::accept(ws_fd, &mut addr as *mut _ as *mut _, &mut alen as *mut _) };
-                if cfd >= 0 { log(b"kei_tty: WS client\n"); serve_ws_client(cfd); }
-            }
+    let ws_fd = create_tcp_listener(8423);
+    if ws_fd >= 0 { log(b"kei_tty: WS listening on :8423\n"); }
+
+    let mut mouse_fd: i32 = -1;
+    for i in 0..8u32 {
+        let path = format!("/dev/input/event{}", i);
+        if let Ok(fd) = open_dev(&path) {
+            let name = get_dev_name(fd);
+            if name.contains("Mouse") { mouse_fd = fd; break; }
+            unsafe { libc::close(fd); }
         }
     }
-    loop { std::thread::sleep(std::time::Duration::from_secs(3600)); }
+
+    log(b"kei_tty: entering standby\n");
+    let mut event_buf = [0u8; 24 * 8];
+    loop {
+        let mut fds = [libc::pollfd { fd: -1, events: 0, revents: 0 }; 3];
+        let mut n: u64 = 0;
+        if mouse_fd >= 0 { fds[n as usize] = libc::pollfd { fd: mouse_fd, events: libc::POLLIN, revents: 0 }; n += 1; }
+        if ws_fd >= 0 { fds[n as usize] = libc::pollfd { fd: ws_fd, events: libc::POLLIN, revents: 0 }; n += 1; }
+        if n == 0 { std::thread::sleep(std::time::Duration::from_secs(1)); continue; }
+        if unsafe { libc::poll(fds.as_mut_ptr(), n, 500) } <= 0 { continue; }
+        if mouse_fd >= 0 && fds[0].revents & libc::POLLIN != 0 {
+            unsafe { libc::read(mouse_fd, event_buf.as_mut_ptr() as *mut _, event_buf.len()); }
+        }
+        let ws_idx = if mouse_fd >= 0 { 1 } else { 0 };
+        if ws_fd >= 0 && ws_idx < n as usize && fds[ws_idx].revents & libc::POLLIN != 0 {
+            let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+            let mut alen: libc::socklen_t = std::mem::size_of::<libc::sockaddr_in>() as u32;
+            let cfd = unsafe { libc::accept(ws_fd, &mut addr as *mut _ as *mut _, &mut alen as *mut _) };
+            if cfd >= 0 { log(b"kei_tty: WS client\n"); serve_ws_client(cfd); }
+        }
+    }
 }
 
+/// Decode an embedded PNG into (width, height, RGBA8 pixels).
+#[cfg(unix)]
+fn decode_png_rgba(data: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
+    let mut decoder = png::Decoder::new(data);
+    decoder.set_transformations(png::Transformations::RGBA | png::Transformations::STRIP_16);
+    let mut reader = decoder.read_info().ok()?;
+    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let info = reader.next_frame(&mut buf).ok()?;
+    buf.truncate(info.buffer_size());
+    Some((info.width as usize, info.height as usize, buf))
+}
+
+#[cfg(unix)]
 fn open_dev(path: &str) -> std::io::Result<i32> {
     let c = std::ffi::CString::new(path).map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
     let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_NONBLOCK) };
     if fd < 0 { Err(std::io::Error::last_os_error()) } else { Ok(fd) }
 }
 
+#[cfg(unix)]
 fn get_dev_name(fd: i32) -> String {
     let mut buf = [0u8; 256];
     let ret = unsafe { libc::ioctl(fd, 0x81004506u64 as _, buf.as_mut_ptr()) };
@@ -98,6 +144,7 @@ fn get_dev_name(fd: i32) -> String {
     else { String::new() }
 }
 
+#[cfg(unix)]
 fn create_tcp_listener(port: u16) -> i32 {
     unsafe {
         let fd = libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0);
@@ -113,6 +160,7 @@ fn create_tcp_listener(port: u16) -> i32 {
     }
 }
 
+#[cfg(unix)]
 fn serve_ws_client(fd: i32) {
     unsafe { let fl = libc::fcntl(fd, libc::F_GETFL); libc::fcntl(fd, libc::F_SETFL, fl & !libc::O_NONBLOCK); }
     let mut buf = [0u8; 4096];
@@ -145,6 +193,7 @@ fn serve_ws_client(fd: i32) {
     unsafe { libc::close(fd); }
 }
 
+#[cfg(unix)]
 fn ws_read(fd: i32, buf: &mut [u8]) -> i32 {
     let mut hdr = [0u8; 2];
     if unsafe { libc::read(fd, hdr.as_mut_ptr() as _, 2) } < 2 { return -1; }
@@ -163,6 +212,7 @@ fn ws_read(fd: i32, buf: &mut [u8]) -> i32 {
     n as i32
 }
 
+#[cfg(unix)]
 fn ws_write(fd: i32, data: &[u8]) {
     let mut hdr = vec![0x81u8];
     if data.len() < 126 { hdr.push(data.len() as u8); }
@@ -171,11 +221,13 @@ fn ws_write(fd: i32, data: &[u8]) {
     unsafe { libc::write(fd, hdr.as_ptr() as _, hdr.len()); libc::write(fd, data.as_ptr() as _, data.len()); }
 }
 
+#[cfg(unix)]
 fn extract_key(req: &str) -> String {
     for l in req.lines() { if l.trim().to_lowercase().starts_with("sec-websocket-key:") { return l[18..].trim().to_string(); } }
     String::new()
 }
 
+#[cfg(unix)]
 fn compute_accept(key: &str) -> String {
     let chk = format!("{}258EAFA5-E914-47DA-95CA-C5AB0DC85B11", key);
     let hash = sha1(chk.as_bytes());
@@ -192,6 +244,7 @@ fn compute_accept(key: &str) -> String {
     b64
 }
 
+#[cfg(unix)]
 fn sha1(data: &[u8]) -> [u8; 20] {
     let mut h: [u32; 5] = [0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476, 0xC3D2E1F0];
     let bl = (data.len() as u64) * 8;

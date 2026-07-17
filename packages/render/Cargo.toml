@@ -174,7 +174,7 @@ required-features = []
 [[bin]]
 name = "kei_tty"
 path = "src/bin/kei_tty.rs"
-required-features = ["winit", "js"]
+required-features = ["png"]
 
 [[bin]]
 name = "kei_ui"
@@ -239,6 +239,11 @@ required-features = ["winit", "js"]
 [[bin]]
 name = "prerender_cursor"
 path = "src/bin/prerender_cursor.rs"
+required-features = ["render"]
+
+[[bin]]
+name = "prerender_vtty"
+path = "src/bin/prerender_vtty.rs"
 required-features = ["render"]
 
 [[bin]]
