@@ -3,13 +3,16 @@
 // Avoids tracing-subscriber init (musl hang) — uses libc::write instead.
 
 // Test if .init_array constructors are executed on kei.
+#[cfg(unix)]
 static mut CTOR_RAN: u32 = 0;
 
 // Register a function pointer in .init_array section
+#[cfg(unix)]
 #[unsafe(link_section = ".init_array")]
 #[used]
 static CTOR: unsafe extern "C" fn() = unsafe { ctor_init };
 
+#[cfg(unix)]
 unsafe extern "C" fn ctor_init() {
     unsafe {
         CTOR_RAN = 0xDEAD_BEEF;
@@ -17,6 +20,16 @@ unsafe extern "C" fn ctor_init() {
 }
 
 fn main() {
+    real_main();
+}
+
+#[cfg(not(unix))]
+fn real_main() {
+    eprintln!("kei_ui: unix-only binary (kei /dev/fb0 target); nothing to do on this host");
+}
+
+#[cfg(unix)]
+fn real_main() {
     // Check if constructor ran
     let ctor_ran = unsafe { CTOR_RAN };
     let msg: &[u8] = if ctor_ran == 0xDEAD_BEEF {

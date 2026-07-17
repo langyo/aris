@@ -7,6 +7,16 @@
 // IMPORTANT: avoids tracing-subscriber init (which triggers musl malloc init
 // that hangs on kei). Uses raw libc::write for stderr output instead.
 fn main() {
+    real_main();
+}
+
+#[cfg(not(unix))]
+fn real_main() {
+    eprintln!("kei_fbtest: unix-only binary (kei /dev/fb0 target); nothing to do on this host");
+}
+
+#[cfg(unix)]
+fn real_main() {
     // Skip aris_render::init_logging() — it pulls in tracing-subscriber which
     // initializes regex/malloc and hangs on kei's musl runtime. Use direct
     // write(2, ...) instead.

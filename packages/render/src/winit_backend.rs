@@ -320,12 +320,18 @@ struct FindState {
     caret_blink: bool,
 }
 
-/// Build a FontContext that registers the embedded DejaVu Sans as a
+/// Build a FontContext that registers the embedded DejaVu fonts as a
 /// guaranteed fallback, while still allowing blitz-dom's system_fonts
 /// discovery to add platform fonts (DirectWrite on Windows, fontconfig
 /// on Linux, CoreText on macOS).
+///
+/// The embedded faces are APPENDED to the generic-family and script-fallback
+/// maps (registered fonts are not added there automatically), so text still
+/// renders on machines where system font discovery finds nothing.
 fn new_font_context() -> parley::FontContext {
-    use parley::fontique::{Blob, Collection, CollectionOptions, SourceCache};
+    use parley::fontique::{
+        Blob, Collection, CollectionOptions, FallbackKey, GenericFamily, Script, SourceCache,
+    };
     let mut font_ctx = parley::FontContext {
         source_cache: SourceCache::new_shared(),
         collection: Collection::new(CollectionOptions {
@@ -333,8 +339,43 @@ fn new_font_context() -> parley::FontContext {
             system_fonts: true,
         }),
     };
-    let blob = Blob::new(std::sync::Arc::new(crate::EMBEDDED_FONT.to_vec()));
-    font_ctx.collection.register_fonts(blob, None);
+    let sans_ids: Vec<_> = font_ctx
+        .collection
+        .register_fonts(
+            Blob::new(std::sync::Arc::new(crate::EMBEDDED_FONT.to_vec())),
+            None,
+        )
+        .into_iter()
+        .map(|(family_id, _)| family_id)
+        .collect();
+    let mono_ids: Vec<_> = font_ctx
+        .collection
+        .register_fonts(
+            Blob::new(std::sync::Arc::new(crate::EMBEDDED_MONO_FONT.to_vec())),
+            None,
+        )
+        .into_iter()
+        .map(|(family_id, _)| family_id)
+        .collect();
+
+    use GenericFamily::*;
+    for generic in [SansSerif, Serif, Cursive, Fantasy, SystemUi, UiSerif, UiSansSerif, UiRounded, Emoji, Math, FangSong] {
+        font_ctx
+            .collection
+            .append_generic_families(generic, sans_ids.iter().copied());
+    }
+    for generic in [Monospace, UiMonospace] {
+        font_ctx.collection.append_generic_families(
+            generic,
+            mono_ids.iter().chain(sans_ids.iter()).copied(),
+        );
+    }
+    let all_ids = || sans_ids.iter().chain(mono_ids.iter()).copied();
+    for tag in [*b"Latn", *b"Grek", *b"Cyrl", *b"Zyyy", *b"Zinh"] {
+        font_ctx
+            .collection
+            .append_fallbacks(FallbackKey::new(Script::from_bytes(tag), None), all_ids());
+    }
     font_ctx
 }
 

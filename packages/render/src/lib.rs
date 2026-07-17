@@ -39,9 +39,96 @@ pub mod webrtc;
 use anyrender::ImageRenderer;
 
 /// Embedded fallback font for headless/fbdev builds where `system_fonts` is off.
-/// DejaVu Sans (latin-400) — SIL-compatible open-source license.
+/// DejaVu Sans (latin-400) — SIL-compatible open-source license
+/// (see `assets/LICENSE.dejavu`).
 #[cfg(feature = "render")]
 pub(crate) const EMBEDDED_FONT: &[u8] = include_bytes!("../assets/font.ttf");
+
+/// Embedded monospace font for terminal/console output (kei vtty).
+/// DejaVu Sans Mono, subset to Basic Latin + Latin-1 + box-drawing (~41 KB)
+/// so it registers fast and stays small enough for embedded targets.
+#[cfg(feature = "render")]
+pub(crate) const EMBEDDED_MONO_FONT: &[u8] = include_bytes!("../assets/font-mono.ttf");
+
+/// Raw bytes of the embedded proportional font (DejaVu Sans).
+#[cfg(feature = "render")]
+pub fn embedded_font() -> &'static [u8] {
+    EMBEDDED_FONT
+}
+
+/// Raw bytes of the embedded monospace font (DejaVu Sans Mono subset).
+#[cfg(feature = "render")]
+pub fn embedded_mono_font() -> &'static [u8] {
+    EMBEDDED_MONO_FONT
+}
+
+/// Build a `FontContext` backed only by the embedded fonts — no system font
+/// discovery. This is the context every headless/fbdev render path must use.
+///
+/// Critical: after `register_fonts`, fontique's generic-family map and
+/// script-fallback map are EMPTY (they are only populated from the system
+/// font store). Without explicit wiring, CSS generic families like
+/// `sans-serif`/`monospace` match zero fonts and parley lays out no glyphs —
+/// the "text does not render" bug seen on kei. Here we map every generic
+/// family and the common scripts onto the embedded faces.
+#[cfg(feature = "render")]
+pub fn new_embedded_font_context() -> parley::FontContext {
+    use parley::fontique::{
+        Blob, Collection, CollectionOptions, FallbackKey, GenericFamily, Script, SourceCache,
+    };
+    use std::sync::Arc;
+
+    let mut font_ctx = parley::FontContext {
+        source_cache: SourceCache::new_shared(),
+        collection: Collection::new(CollectionOptions {
+            shared: false,
+            system_fonts: false,
+        }),
+    };
+
+    // Register with a concrete Vec<u8> blob (not Arc<dyn AsRef<[u8]>>) —
+    // the dyn vtable dispatch produced NULL reads on kei's VM.
+    let sans_ids: Vec<_> = font_ctx
+        .collection
+        .register_fonts(Blob::new(Arc::new(EMBEDDED_FONT.to_vec())), None)
+        .into_iter()
+        .map(|(family_id, _)| family_id)
+        .collect();
+    let mono_ids: Vec<_> = font_ctx
+        .collection
+        .register_fonts(Blob::new(Arc::new(EMBEDDED_MONO_FONT.to_vec())), None)
+        .into_iter()
+        .map(|(family_id, _)| family_id)
+        .collect();
+
+    // Generic families → embedded faces. Mono-first for monospace,
+    // DejaVu Sans for everything else.
+    use GenericFamily::*;
+    for generic in [SansSerif, Serif, Cursive, Fantasy, SystemUi, UiSerif, UiSansSerif, UiRounded, Emoji, Math, FangSong] {
+        font_ctx
+            .collection
+            .set_generic_families(generic, sans_ids.iter().copied());
+    }
+    for generic in [Monospace, UiMonospace] {
+        font_ctx.collection.set_generic_families(
+            generic,
+            mono_ids.iter().chain(sans_ids.iter()).copied(),
+        );
+    }
+
+    // Script fallbacks → embedded faces, so runs in any of these scripts
+    // still find a font instead of an empty fallback chain.
+    let all_ids = || sans_ids.iter().chain(mono_ids.iter()).copied();
+    for tag in [
+        *b"Latn", *b"Grek", *b"Cyrl", *b"Armn", *b"Geor", *b"Hebr", *b"Zyyy", *b"Zinh",
+    ] {
+        font_ctx
+            .collection
+            .append_fallbacks(FallbackKey::new(Script::from_bytes(tag), None), all_ids());
+    }
+
+    font_ctx
+}
 
 /// Initialize structured logging with timestamps and levels.
 ///
@@ -136,23 +223,9 @@ pub fn render_html(html: &str, config: &RenderConfig) -> anyhow::Result<Frame> {
     use blitz_html::HtmlDocument;
     use blitz_traits::shell::Viewport;
 
-    // Create a FontContext with the embedded font registered.
-    // Use Blob::from_vec to avoid Arc<dyn AsRef<[u8]>> vtable dispatch
-    // (which produces NULL on kei's VM).
-
-    use parley::FontContext;
-    use parley::fontique::{Collection, CollectionOptions, SourceCache};
-
-    let mut font_ctx = FontContext {
-        source_cache: SourceCache::new_shared(),
-        collection: Collection::new(CollectionOptions {
-            shared: false,
-            system_fonts: false,
-        }),
-    };
-    let font_blob: parley::fontique::Blob<u8> =
-        parley::fontique::Blob::new(std::sync::Arc::new(EMBEDDED_FONT.to_vec()));
-    font_ctx.collection.register_fonts(font_blob, None);
+    // FontContext with the embedded fonts registered AND generic-family /
+    // script-fallback maps wired (see new_embedded_font_context).
+    let font_ctx = new_embedded_font_context();
 
     let viewport: Viewport = Viewport {
         window_size: (width, height),
@@ -256,22 +329,10 @@ pub fn render_html_with_font(html: &str, config: &RenderConfig) -> anyhow::Resul
     use blitz_dom::DocumentConfig;
     use blitz_html::HtmlDocument;
     use blitz_traits::shell::Viewport;
-    use linebender_resource_handle::Blob;
-    use parley::FontContext;
-    use parley::fontique::{Collection, CollectionOptions, SourceCache};
-    use std::sync::Arc;
 
-    // Build a FontContext with the embedded font — no system_fonts needed.
-    let mut font_ctx = FontContext {
-        source_cache: SourceCache::new_shared(),
-        collection: Collection::new(CollectionOptions {
-            shared: false,
-            system_fonts: false,
-        }),
-    };
-    font_ctx
-        .collection
-        .register_fonts(Blob::new(Arc::new(EMBEDDED_FONT) as _), None);
+    // Embedded-font FontContext with generic families + fallbacks wired
+    // (same context as render_html; no system font discovery).
+    let font_ctx = new_embedded_font_context();
 
     let viewport = Viewport {
         window_size: (width, height),

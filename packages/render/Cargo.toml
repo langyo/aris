@@ -107,6 +107,9 @@ render = [
 desktop = ["blitz-dom/system_fonts", "blitz-dom/svg"]
 # Execute <script> blocks via Boa before rendering.
 js = ["dep:aris-js", "dep:boa_engine", "dep:boa_gc"]
+# PNG encoding/decoding only (for pre-rendered framebuffer assets, e.g. the
+# kei vtty console frame embedded by kei_tty).
+png = ["dep:png"]
 # WebGL support via wgpu (GLSL→WGSL via naga, renders to offscreen texture).
 webgl = ["dep:wgpu", "dep:naga", "dep:pollster"]
 # WebRTC support via str0m (pure Rust sans-IO WebRTC).
@@ -144,6 +147,11 @@ path = "src/bin/conformance_test.rs"
 required-features = ["winit", "js"]
 
 [[bin]]
+name = "font_smoke"
+path = "src/bin/font_smoke.rs"
+required-features = ["render"]
+
+[[bin]]
 name = "kei_aris_ui"
 path = "src/bin/kei_aris_ui.rs"
 required-features = ["winit", "js"]
@@ -156,12 +164,12 @@ required-features = ["winit", "js"]
 [[bin]]
 name = "kei_fbtest"
 path = "src/bin/kei_fbtest.rs"
-required-features = ["winit", "js"]
+required-features = []
 
 [[bin]]
 name = "kei_minimal"
 path = "src/bin/kei_minimal.rs"
-required-features = ["winit", "js"]
+required-features = []
 
 [[bin]]
 name = "kei_tty"
@@ -171,7 +179,7 @@ required-features = ["winit", "js"]
 [[bin]]
 name = "kei_ui"
 path = "src/bin/kei_ui.rs"
-required-features = ["winit", "js"]
+required-features = ["render"]
 
 [[bin]]
 name = "offline_canvas_js_test"
@@ -231,7 +239,7 @@ required-features = ["winit", "js"]
 [[bin]]
 name = "prerender_cursor"
 path = "src/bin/prerender_cursor.rs"
-required-features = ["winit", "js"]
+required-features = ["render"]
 
 [[bin]]
 name = "render_js_demo"
@@ -246,7 +254,7 @@ required-features = ["winit", "js"]
 [[bin]]
 name = "render_test"
 path = "src/bin/render_test.rs"
-required-features = ["winit", "js"]
+required-features = ["render"]
 
 [[bin]]
 name = "render_window"
