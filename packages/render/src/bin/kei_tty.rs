@@ -118,10 +118,10 @@ fn real_main() {
 }
 
 /// Decode an embedded PNG into (width, height, RGBA8 pixels).
+/// The asset is written by prerender_vtty as RGBA8, so no transforms needed.
 #[cfg(unix)]
 fn decode_png_rgba(data: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
-    let mut decoder = png::Decoder::new(data);
-    decoder.set_transformations(png::Transformations::RGBA | png::Transformations::STRIP_16);
+    let decoder = png::Decoder::new(data);
     let mut reader = decoder.read_info().ok()?;
     let mut buf = vec![0u8; reader.output_buffer_size()];
     let info = reader.next_frame(&mut buf).ok()?;
