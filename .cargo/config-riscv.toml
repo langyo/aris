@@ -1,3 +1,15 @@
+# aris — riscv64 cross-compilation configuration (external musl toolchain).
+#
+# The default `.cargo/config.toml` already covers riscv64gc-unknown-linux-musl
+# with rust-lld self-contained linking, so NO external toolchain is needed.
+# Use this file only if you prefer an external musl gcc: rename it to
+# `config.toml` (replacing the default) and make sure the linker below is on
+# your PATH.
+#
+# Install the musl cross-toolchain:
+#   Ubuntu: sudo apt install gcc-riscv64-linux-gnu
+#   Or:     download from https://musl.cc/
+
 [target.riscv64gc-unknown-linux-musl]
-linker = "D:\源代码\工程项目\celestia\tools\riscv64-linux-musl-cross\bin\riscv64-linux-musl-gcc.exe"
+linker = "riscv64-linux-musl-gcc"
 rustflags = ["-C", "link-arg=-static"]

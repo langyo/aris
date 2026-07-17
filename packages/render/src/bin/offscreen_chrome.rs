@@ -21,7 +21,7 @@ fn main() {
         .unwrap_or(600);
     let out = std::env::args()
         .nth(3)
-        .unwrap_or_else(|| "D:/tmp/offscreen_chrome.png".to_string());
+        .unwrap_or_else(|| "offscreen_chrome.png".to_string());
 
     aris_render::init_logging();
     let scale = 1.0_f32; // simulate a 1.0 scale_factor (DPI)
