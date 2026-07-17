@@ -195,6 +195,12 @@ struct App {
     /// All open tabs. The active tab is `tabs[active]`.
     tabs: Vec<Tab>,
     active: usize,
+    /// Client-area size in PHYSICAL pixels. Invariant: this always equals
+    /// the window's actual client area (`Window::inner_size` / `Resized`
+    /// payload, which winit reports in physical pixels), so the softbuffer
+    /// surface and the render viewport match the client area exactly — no
+    /// more, no less. CSS/logical pixels only appear after dividing by
+    /// `scale_factor` at the layout/input layer.
     phys_size: (u32, u32),
     scale_factor: f64,
     last_caret: Instant,
@@ -1233,7 +1239,7 @@ impl ApplicationHandler for App {
         let inner = window.inner_size();
         self.phys_size = (inner.width.max(1), inner.height.max(1));
         tracing::info!(
-            "resumed: scale_factor={} inner={}x{} (logical {}x{})",
+            "resumed: scale_factor={} inner(physical)={}x{} (requested logical {}x{})",
             self.scale_factor,
             inner.width,
             inner.height,
@@ -1265,14 +1271,19 @@ impl ApplicationHandler for App {
                 self.modifiers = m.state();
             }
             WindowEvent::Resized(size) => {
+                // `Resized` carries the client area's new dimensions as a
+                // PhysicalSize — already PHYSICAL pixels, decorations
+                // excluded. Do NOT multiply by scale_factor again: that
+                // double-scaled the viewport (phys_size = client × scale²),
+                // making the surface larger than the window and cropping
+                // content on the right/bottom edges whenever the display
+                // scale is > 100%.
                 self.scale_factor = self
                     .window
                     .as_ref()
                     .map(|w| w.scale_factor())
                     .unwrap_or(1.0);
-                let pw = (size.width as f64 * self.scale_factor).round() as u32;
-                let ph = (size.height as f64 * self.scale_factor).round() as u32;
-                self.phys_size = (pw.max(1), ph.max(1));
+                self.phys_size = (size.width.max(1), size.height.max(1));
                 self.build_doc();
                 if let Some(w) = &self.window {
                     w.request_redraw();
@@ -1280,6 +1291,14 @@ impl ApplicationHandler for App {
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 self.scale_factor = scale_factor;
+                // The OS default behavior resizes the window for the new DPI
+                // and a `Resized` event normally follows, but that is not
+                // guaranteed on every platform. Re-read the client area here
+                // too so `phys_size` stays exactly in sync.
+                if let Some(w) = &self.window {
+                    let inner = w.inner_size();
+                    self.phys_size = (inner.width.max(1), inner.height.max(1));
+                }
                 self.build_doc();
                 if let Some(w) = &self.window {
                     w.request_redraw();
@@ -1437,7 +1456,11 @@ impl ApplicationHandler for App {
                     winit::event::MouseScrollDelta::LineDelta(x, y) => {
                         (x as f64 * 30.0, y as f64 * 30.0)
                     }
-                    winit::event::MouseScrollDelta::PixelDelta(p) => (p.x, p.y),
+                    winit::event::MouseScrollDelta::PixelDelta(p) => {
+                        // PixelDelta is in PHYSICAL pixels; scroll_node_by
+                        // works in CSS px, so convert by the scale factor.
+                        (p.x / self.scale_factor, p.y / self.scale_factor)
+                    }
                 };
                 if let Some(doc) = self.active_tab_mut().doc.as_mut() {
                     let hover = doc.get_hover_node_id().unwrap_or(0);
