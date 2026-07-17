@@ -5,11 +5,26 @@ set shell := ["bash", "-c"]
 set windows-shell := ["bash.exe", "-c"]
 set unstable
 set lists
+# python_cmd is defined both below (fresh-clone fallback) and in the staged
+# .just/celestia-devtools.just, so duplicates must be allowed. Verified with
+# just 1.55.1: with allow-duplicate-variables the MAIN justfile's definition
+# always wins over an imported one, regardless of position — so the fallback
+# below MUST mirror the devtools expression, or it would silently override it.
+set allow-duplicate-variables
 
 # Shared celestia-devtools recipes — NOT in git. This justfile references shared
 # variables, so the import is REQUIRED. Bootstrap once: celestia-devtools init
 # (or `just fetch` if already staged). Refresh after upgrades.
-python_cmd := "python3"
+#
+# Fallback for fresh clones before .just/ is staged. Mirrors the expression in
+# .just/celestia-devtools.just: on Windows prefer `python` — `python3` is often
+# the broken WindowsApps Store stub that exits 49; on Unix prefer `python3`.
+# Keep in sync when refreshing .just/ (see the note above).
+python_cmd := if os_family() == "windows" {
+    if which("python") != "" { "python" } else { "python3" }
+} else {
+    if which("python3") != "" { "python3" } else { "python" }
+}
 import? "./.just/git-bash-interop.just"
 import? "./.just/celestia-devtools.just"
 
